@@ -27,8 +27,14 @@ jobs:
           sudo chown "$USER" /bo1
           rsync -a --exclude .git ./ /bo1/src/
 
-      - name: Build image
-        run: docker build -t bo1-build tools/native/docker
+      - name: Build image (with retries)
+        run: |
+          for i in 1 2 3 4 5; do
+            docker build -t bo1-build tools/native/docker && exit 0
+            echo "docker build failed (try $i of 5); waiting 90 s"
+            sleep 90
+          done
+          exit 1
 
       - name: Start container
         run: docker run -d --name bo1-x64 -v /bo1:/bo1 bo1-build
