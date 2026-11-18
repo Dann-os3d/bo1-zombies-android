@@ -33,6 +33,9 @@ jobs:
       - name: Start container
         run: docker run -d --name bo1-x64 -v /bo1:/bo1 bo1-build
 
+      - name: Install patch (missing from the project's Docker image; build-llvm.sh needs it)
+        run: docker exec bo1-x64 bash -c 'apt-get update && apt-get install -y --no-install-recommends patch'
+
       - name: Restore patched clang
         id: clang
         uses: actions/cache/restore@v4
