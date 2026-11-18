@@ -1,0 +1,25 @@
+name: apply-zips
+# Runs when a .zip is uploaded to the repository's main folder (together with apply-zips.sh), or by hand
+# (Actions > apply-zips > Run workflow).
+on:
+  push:
+    paths:
+      - "*.zip"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-zips
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Unzip and apply
+        run: bash apply-zips.sh
