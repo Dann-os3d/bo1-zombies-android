@@ -82,8 +82,24 @@ static int CopyFile(const char *from, const char *to)
     return ok;
 }
 
+// mod (mali): what the Vulkan renderer (DXVK) needs from the GPU, for the log and for BO1_GPU_VENDOR (docs/mali.md)
+typedef struct
+{
+    uint32_t vendorId;      // 0x13B5 ARM (Mali), 0x5143 Qualcomm (Adreno), ...
+    uint32_t apiVersion;
+    int robustness2;        // VK_EXT_robustness2 listed
+    int nullDescriptor;     // its nullDescriptor feature (DXVK needs it)
+    int pipelineLibrary;    // VK_EXT_graphics_pipeline_library listed
+} GpuInfo;
+
+static const char *VendorName(uint32_t id)
+{
+    return id == 0x13B5 ? "arm" : id == 0x5143 ? "qualcomm" : "other";
+}
+
 // the first device of the driver behind getProc, as "<device>, <driver name> <driver info>, Vulkan x.y.z"; 0 without one
-static int Describe(PFN_vkGetInstanceProcAddr getProc, char *out, size_t size)
+// gpu (optional): filled with the device's vendor and the features the renderer depends on
+static int Describe(PFN_vkGetInstanceProcAddr getProc, char *out, size_t size, GpuInfo *gpu)
 {
     PFN_vkCreateInstance createInstance = (PFN_vkCreateInstance)getProc(NULL, "vkCreateInstance");
     VkApplicationInfo app = { VK_STRUCTURE_TYPE_APPLICATION_INFO };
@@ -109,10 +125,53 @@ static int Describe(PFN_vkGetInstanceProcAddr getProc, char *out, size_t size)
             driver.driverInfo, VK_API_VERSION_MAJOR(p->driverVersion), VK_API_VERSION_MINOR(p->driverVersion),
             VK_API_VERSION_PATCH(p->driverVersion), VK_API_VERSION_MAJOR(p->apiVersion),
             VK_API_VERSION_MINOR(p->apiVersion), VK_API_VERSION_PATCH(p->apiVersion));
+        if (gpu)
+        {
+            memset(gpu, 0, sizeof(*gpu));
+            gpu->vendorId = p->vendorID;
+            gpu->apiVersion = p->apiVersion;
+            PFN_vkEnumerateDeviceExtensionProperties listExtensions =
+                (PFN_vkEnumerateDeviceExtensionProperties)getProc(instance, "vkEnumerateDeviceExtensionProperties");
+            uint32_t n = 0;
+            if (listExtensions && listExtensions(device, NULL, &n, NULL) >= 0 && n)
+            {
+                VkExtensionProperties *list = (VkExtensionProperties *)malloc(n * sizeof(*list));
+                if (list && listExtensions(device, NULL, &n, list) >= 0)
+                {
+                    for (uint32_t i = 0; i < n; i++)
+                    {
+                        if (!strcmp(list[i].extensionName, "VK_EXT_robustness2"))
+                            gpu->robustness2 = 1;
+                        else if (!strcmp(list[i].extensionName, "VK_EXT_graphics_pipeline_library"))
+                            gpu->pipelineLibrary = 1;
+                    }
+                }
+                free(list);
+            }
+            PFN_vkGetPhysicalDeviceFeatures2 features2 =
+                (PFN_vkGetPhysicalDeviceFeatures2)getProc(instance, "vkGetPhysicalDeviceFeatures2");
+            if (features2 && gpu->robustness2)
+            {
+                VkPhysicalDeviceRobustness2FeaturesEXT robust = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT };
+                VkPhysicalDeviceFeatures2 features = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &robust };
+                features2(device, &features);
+                gpu->nullDescriptor = robust.nullDescriptor ? 1 : 0;
+            }
+        }
     }
     if (destroyInstance)
         destroyInstance(instance, NULL);
     return found;
+}
+
+// mod (mali): one log line and BO1_GPU_VENDOR (arm, qualcomm, other) for the engine; nothing here changes a setting
+static void ReportGpu(const GpuInfo *gpu)
+{
+    setenv("BO1_GPU_VENDOR", VendorName(gpu->vendorId), 1);
+    Say("gpu: vendor %s (0x%04X), Vulkan %u.%u, VK_EXT_robustness2 %s, nullDescriptor %s, graphics pipeline library %s; "
+        "DXVK needs Vulkan 1.3 and nullDescriptor",
+        VendorName(gpu->vendorId), gpu->vendorId, VK_API_VERSION_MAJOR(gpu->apiVersion), VK_API_VERSION_MINOR(gpu->apiVersion),
+        gpu->robustness2 ? "yes" : "no", gpu->nullDescriptor ? "yes" : "no", gpu->pipelineLibrary ? "yes" : "no");
 }
 
 static void UseSystemDriver(const char *why)
@@ -121,9 +180,12 @@ static void UseSystemDriver(const char *why)
     char description[512] = "no device";
     void *vulkan = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
     PFN_vkGetInstanceProcAddr getProc = vulkan ? (PFN_vkGetInstanceProcAddr)dlsym(vulkan, "vkGetInstanceProcAddr") : NULL;
-    if (getProc)
-        Describe(getProc, description, sizeof(description));
+    GpuInfo gpu;
+    memset(&gpu, 0, sizeof(gpu));
+    int found = getProc ? Describe(getProc, description, sizeof(description), &gpu) : 0;
     Say("system (%s): %s", why, description);
+    if (found)
+        ReportGpu(&gpu);
 }
 
 // the custom driver named by driver.txt; NULL when it is in use, else why not
@@ -200,7 +262,7 @@ static const char *TryCustomDriver(const char *files, const char *nativeDir)
     void *vulkan = openLibvulkan(RTLD_NOW, ADRENOTOOLS_DRIVER_CUSTOM, NULL, hookDir, dir, library, NULL, NULL);
     PFN_vkGetInstanceProcAddr getProc = vulkan ? (PFN_vkGetInstanceProcAddr)dlsym(vulkan, "vkGetInstanceProcAddr") : NULL;
     char description[512];
-    if (!getProc || !Describe(getProc, description, sizeof(description)))
+    if (!getProc || !Describe(getProc, description, sizeof(description), NULL))
     {
         Say("%s (%s): adrenotools_open_libvulkan %s", name, library, !vulkan ? "failed (see logcat, tag AdrenoTools)"
             : !getProc ? "gave a loader without vkGetInstanceProcAddr" : "loaded it, but it has no device");

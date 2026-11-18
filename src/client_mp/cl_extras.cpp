@@ -13,6 +13,9 @@
 //   HOLD TO FIRE        bo1_touch_autofire 0 / 1: a held FIRE keeps firing pistols and other one-shot-per-pull weapons
 //   EDIT TOUCH LAYOUT   closes this screen and starts touch_edit
 //   RESET TOUCH LAYOUT  touch_reset
+//   GRAPHICS QUALITY    bo1_quality 0 Custom / 1 Ultra low / 2 Low / 3 Medium / 4 High: sets resolution, textures,
+//                       anisotropy, shadows, depth of field, detail distance and clouds, then restarts the video
+//                       (client_mp/cl_quality.h)
 //   FPS COUNTER         bo1_fpscounter 0..3                    (client_mp/cl_scrn_mp.cpp)
 //   RENDERER            bo1_renderer 0 / 1, at the next start  (web/web_input.cpp)
 //   NEW SHADERS         bo1_vk_async 0 / 1 / 2, at the next start  (web/web_input.cpp; Vulkan only)
@@ -35,6 +38,7 @@
 #ifdef BO1_NATIVE
 #include "cl_joinmenu.h"
 #include "cl_play.h"
+#include "cl_quality.h"
 #include <universal/com_files.h>
 #include "cl_main_mp.h"
 #include <client/client.h>
@@ -83,6 +87,7 @@ const char *const kOffOn[] = { "Off", "On" };
 const char *const kCounter[] = { "None", "Simple", "Advanced", "Full" };
 const char *const kRenderer[] = { "OpenGL ES", "Vulkan" };
 const char *const kShaderCompile[] = { "Wait (stutter)", "Effects in background", "All in background (flashes)" };   // bo1_vk_async 0 / 1 / 2
+const char *const kQuality[] = { "Custom", "Ultra low", "Low", "Medium", "High" };   // bo1_quality 0..4
 const char *const kBots[] = { "0", "1", "2", "3", "4", "5", "6", "7", "8", "9" };
 const char *const kDifficulty[] = { "Recruit", "Regular", "Hardened", "Veteran" };   // easy, normal, hard, fu
 
@@ -101,6 +106,8 @@ const Row kRows[] = {
 #endif
     // mod (native): no FRAME RATE LIMIT row (com_maxfps): Settings > Graphics decides the frame rate (SCREEN REFRESH
     // RATE with SYNC EVERY FRAME); the console's com_maxfps still works
+    // mod (quality): one row for the settings that decide the speed on a weak GPU (cl_quality.h)
+    { "GRAPHICS QUALITY", CHOICE, "bo1_quality", 0, 0, 0, 0, kQuality, 0, 5, ACT_NONE },
     { "FPS COUNTER", CHOICE, "bo1_fpscounter", 0, 0, 0, 0, kCounter, 0, 4, ACT_NONE },
 #ifdef BO1_DXVK
     { "RENDERER (RESTART)", CHOICE, "bo1_renderer", 0, 0, 0, 0, kRenderer, 0, 2, ACT_NONE },
@@ -182,11 +189,33 @@ const char *Value(const char *dvar)
     return value ? value : "";
 }
 
+// mod (quality): the settings of preset 1..4 (0 is Custom: nothing), then a video restart to apply them
+void ApplyQuality(int level)
+{
+    if (level < 1 || level >= quality::kPresetCount)
+        return;
+    const quality::Preset &q = quality::kPresets[level];
+    const dvar_s *mode = Dvar_FindVar("r_mode");
+    char name[32];
+    if (mode && quality::PickMode(mode->domain.enumeration.strings, mode->domain.enumeration.stringCount, q.lines, name, (int)sizeof(name)))
+        Cbuf_AddText(0, va("set r_mode \"%s\"\n", name));
+    if (q.aaSamples > 0)
+        Cbuf_AddText(0, va("set r_aaSamples %d\n", q.aaSamples));
+    // r_picmip, _bump and _spec are read-only while r_picmip_manual is 0
+    Cbuf_AddText(0, va("set r_picmip_manual 1\nset r_picmip %d\nset r_picmip_bump %d\nset r_picmip_spec %d\n", q.picmip, q.picmip, q.picmip));
+    Cbuf_AddText(0, va("set r_texFilterAnisoMax %d\n", q.aniso));
+    Cbuf_AddText(0, va("set sm_enable %d\nset sm_maxLights %d\nset r_dof_enable %d\n", q.shadows, q.shadowLights, q.dof));
+    Cbuf_AddText(0, va("set r_lodScaleRigid %g\nset r_lodScaleSkinned %g\nset fx_drawClouds %d\n", q.lod, q.lod, q.clouds));
+    Cbuf_AddText(0, "vid_restart\n");
+}
+
 void Set(const Row &row, const char *value)
 {
     Cbuf_AddText(0, va("set %s \"%s\"\n", row.dvar, value));
     if (row.dvar2)
         Cbuf_AddText(0, va("set %s \"%s\"\n", row.dvar2, value));
+    if (!strcmp(row.dvar, "bo1_quality"))   // mod (quality)
+        ApplyQuality(atoi(value));
 }
 
 int ChoiceIndex(const Row &row)
@@ -422,6 +451,8 @@ void CL_Extras_Draw()
     if (!s_registered)
     {
         s_registered = true;
+        // mod (quality): archived; 0 Custom, 1 Ultra low, 2 Low, 3 Medium, 4 High (cl_quality.h)
+        _Dvar_RegisterInt("bo1_quality", 0, 0, 4, 1u, "mod: graphics quality preset: 0 custom, 1 ultra low, 2 low, 3 medium, 4 high");
         Cmd_AddCommandInternal("extras", OpenCommand, &s_extrasCmd);
     }
     if (!s_open || !cls.whiteMaterial)
