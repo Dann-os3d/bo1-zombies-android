@@ -1,0 +1,71 @@
+name: build-apk
+# Builds the Android APK with the project's own scripts (tools/native/build-all-android.sh) inside its Docker image.
+# Manual only: Actions > build-apk > Run workflow, and choose the branch to build.
+# The first run takes hours (patched clang, DXVK, FFmpeg, the engine twice). The patched clang is cached for the next ones.
+# The APK appears at the bottom of the run's page, under "Artifacts".
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Work folder
+        run: |
+          sudo mkdir -p /bo1
+          sudo chown "$USER" /bo1
+          rsync -a --exclude .git ./ /bo1/src/
+
+      - name: Build image
+        run: docker build -t bo1-build tools/native/docker
+
+      - name: Start container
+        run: docker run -d --name bo1-x64 -v /bo1:/bo1 bo1-build
+
+      - name: Restore patched clang
+        id: clang
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            /bo1/llvm/build/bin
+            /bo1/llvm/build/lib/clang
+          key: clang-21.1.8-${{ hashFiles('tools/p32/*.patch', 'tools/native/build-llvm.sh') }}
+
+      - name: NDK and patched clang
+        run: |
+          docker exec bo1-x64 /bo1/src/tools/native/get-ndk.sh
+          docker exec -e JOBS=4 bo1-x64 bash -c '[ -x /bo1/llvm/build/bin/clang ] || /bo1/src/tools/native/build-llvm.sh'
+
+      - name: Save patched clang
+        if: steps.clang.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            /bo1/llvm/build/bin
+            /bo1/llvm/build/lib/clang
+          key: clang-21.1.8-${{ hashFiles('tools/p32/*.patch', 'tools/native/build-llvm.sh') }}
+
+      - name: Build everything
+        run: docker exec -e JOBS=4 bo1-x64 /bo1/src/tools/native/build-all-android.sh
+
+      - name: Collect the APK
+        run: |
+          mkdir -p apk
+          cp /bo1/android/out/*.apk apk/
+          ls -la apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bo1-apk
+          path: apk/*.apk
